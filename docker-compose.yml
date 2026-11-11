@@ -1,0 +1,212 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-study}
+      POSTGRES_USER: ${POSTGRES_USER:-study}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-study}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.4-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  mailpit:
+    image: axllent/mailpit:v1.21
+    ports:
+      - "127.0.0.1:8025:8025"
+    healthcheck:
+      test: ["CMD", "/mailpit", "readyz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  minio:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/minio.Dockerfile
+    command: ["server", "/data", "--console-address", ":9001"]
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-study-local}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-local-development-secret-change-me}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "127.0.0.1:9001:9001"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://study:study@postgres:5432/study}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      SESSION_TTL_DAYS: ${SESSION_TTL_DAYS:-30}
+      EMAIL_VERIFICATION_HOURS: ${EMAIL_VERIFICATION_HOURS:-24}
+      PASSWORD_RESET_MINUTES: ${PASSWORD_RESET_MINUTES:-30}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-study-platform@localhost}
+      OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY:-}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-study-local}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-local-development-secret-change-me}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-study-documents}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_AUTO_CREATE_BUCKET: ${STORAGE_AUTO_CREATE_BUCKET:-true}
+      MAX_DOCUMENT_UPLOAD_BYTES: ${MAX_DOCUMENT_UPLOAD_BYTES:-26214400}
+      MAX_DOCUMENT_PAGES: ${MAX_DOCUMENT_PAGES:-250}
+      MAX_DOCUMENT_CHUNKS: ${MAX_DOCUMENT_CHUNKS:-500}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-1536}
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    command: ["sh", "-c", "alembic upgrade head && uvicorn apps.api.app.main:app --host 0.0.0.0 --port 8000"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=2)"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/api.Dockerfile
+    command:
+      [
+        "celery",
+        "-A",
+        "apps.worker.app.celery_app:celery_app",
+        "worker",
+        "--beat",
+        "--schedule=/tmp/celerybeat-schedule",
+        "--loglevel=INFO",
+      ]
+    environment:
+      APP_ENV: ${APP_ENV:-development}
+      DATABASE_URL: ${DATABASE_URL:-postgresql+psycopg://study:study@postgres:5432/study}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:3000}
+      SMTP_HOST: ${SMTP_HOST:-mailpit}
+      SMTP_PORT: ${SMTP_PORT:-1025}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-false}
+      SMTP_FROM_EMAIL: ${SMTP_FROM_EMAIL:-study-platform@localhost}
+      OUTBOX_ENCRYPTION_KEY: ${OUTBOX_ENCRYPTION_KEY:-}
+      STORAGE_ENDPOINT_URL: ${STORAGE_ENDPOINT_URL:-http://minio:9000}
+      STORAGE_ACCESS_KEY: ${STORAGE_ACCESS_KEY:-study-local}
+      STORAGE_SECRET_KEY: ${STORAGE_SECRET_KEY:-local-development-secret-change-me}
+      STORAGE_BUCKET: ${STORAGE_BUCKET:-study-documents}
+      STORAGE_REGION: ${STORAGE_REGION:-us-east-1}
+      STORAGE_AUTO_CREATE_BUCKET: ${STORAGE_AUTO_CREATE_BUCKET:-true}
+      MAX_DOCUMENT_UPLOAD_BYTES: ${MAX_DOCUMENT_UPLOAD_BYTES:-26214400}
+      MAX_DOCUMENT_PAGES: ${MAX_DOCUMENT_PAGES:-250}
+      MAX_DOCUMENT_CHUNKS: ${MAX_DOCUMENT_CHUNKS:-500}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_EMBEDDING_MODEL: ${OPENAI_EMBEDDING_MODEL:-text-embedding-3-small}
+      OPENAI_EMBEDDING_DIMENSIONS: ${OPENAI_EMBEDDING_DIMENSIONS:-1536}
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      mailpit:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "celery -A apps.worker.app.celery_app:celery_app inspect ping --timeout=3 | grep -q pong"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  web:
+    build:
+      context: apps/web
+      dockerfile: Dockerfile
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000/api/v1}
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - ./apps/web:/app
+      - web_node_modules:/app/node_modules
+    depends_on:
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 30s
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    ports:
+      - "127.0.0.1:8080:80"
+    volumes:
+      - ./infrastructure/nginx/default.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      web:
+        condition: service_started
+      api:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/health/live"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+  minio_data:
+  web_node_modules:
